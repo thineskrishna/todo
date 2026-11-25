@@ -155,7 +155,15 @@ header.top{display:flex;align-items:flex-end;justify-content:space-between;gap:1
 .save-state::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--done)}
 .save-state.busy::before{background:var(--soon)}
 .save-state.err::before{background:var(--late)}
-.ro .check,.ro .chev{pointer-events:auto}
+.readadd{display:flex;flex-direction:column;gap:8px;margin-bottom:10px}
+.readadd .btn{align-self:flex-start}
+.reads li{align-items:flex-start}
+.reads .rbody{flex:1;min-width:0}
+.reads a{color:var(--fg);text-decoration:none;font-weight:500;display:block;overflow-wrap:anywhere;line-height:1.35}
+.reads a:hover{color:var(--accent)}
+.reads .host{font-size:12px;color:var(--muted);margin-top:2px}
+.reads li.read a{color:var(--muted);text-decoration:line-through}
+.reads .check{margin-top:1px}
 </style>
 <div class="wrap">
   <header class="top">
@@ -220,6 +228,16 @@ header.top{display:flex;align-items:flex-end;justify-content:space-between;gap:1
         <ul class="mini" id="donelist"></ul>
         <div class="more" id="donemore"></div>
       </section>
+      <section class="tile" aria-labelledby="h-read">
+        <h2 id="h-read"><span class="ico" style="background:var(--c-personal)">❏</span>To read</h2>
+        <form class="readadd" id="readform" autocomplete="off">
+          <input class="field" type="text" inputmode="url" id="read-url" placeholder="Paste a link…" aria-label="Link to read later">
+          <input class="field" type="text" id="read-title" placeholder="Title (optional)" aria-label="Title" maxlength="200">
+          <button class="btn" type="submit">Save link</button>
+        </form>
+        <ul class="mini reads" id="readlist"></ul>
+        <div class="more" id="readmore"></div>
+      </section>
     </div>
   </div>
 </div>
@@ -232,7 +250,7 @@ header.top{display:flex;align-items:flex-end;justify-content:space-between;gap:1
   const CAT_COLOR={Research:"var(--c-research)",Development:"var(--c-dev)",Personal:"var(--c-personal)"};
   const STATUSES=["Not started","In progress","Done"];
   const CAN_FS = typeof window.showOpenFilePicker==="function";
-  let tasks=[], deleted={}, handle=null, mode="none"; // none | live | copy
+  let tasks=[], reading=[], deleted={}, handle=null, mode="none"; let showAllRead=false; // none | live | copy
   let fileStamp=0, dirty=false, saving=false, saveTimer=null;
   let filter="All"; const expanded=new Set(); const drafts={}; const confirmDel=new Set(); let showAllDone=false;
   try{ filter=localStorage.getItem("todo-filter")||"All"; }catch(e){}
@@ -283,21 +301,25 @@ header.top{display:flex;align-items:flex-end;justify-content:space-between;gap:1
     const j=JSON.parse(text);
     const list=Array.isArray(j)?j:Array.isArray(j.tasks)?j.tasks:null;
     if(!list) throw new Error("This file doesn't look like a tasks file.");
-    return {tasks:list.filter(t=>t&&t.id&&t.name), deleted:(j&&j.deleted&&typeof j.deleted==="object")?j.deleted:{}};
+    const rd=(j&&Array.isArray(j.reading))?j.reading.filter(r=>r&&r.id&&typeof r.url==="string"):[];
+    return {tasks:list.filter(t=>t&&t.id&&t.name), reading:rd, deleted:(j&&j.deleted&&typeof j.deleted==="object")?j.deleted:{}};
   }
-  const serialize=()=>JSON.stringify({version:1,app:"My To-Do Home",savedAt:new Date().toISOString(),tasks,deleted},null,1);
-  // merge two copies task-by-task: newest edit wins; deletions win over older edits
+  const serialize=()=>JSON.stringify({version:1,app:"My To-Do Home",savedAt:new Date().toISOString(),tasks,reading,deleted},null,1);
+  function apply(d){ tasks=d.tasks; reading=d.reading||[]; deleted=d.deleted; }
+  // merge two copies item-by-item: newest edit wins; deletions win over older edits
+  function mergeList(a,b,del){
+    const byId=new Map();
+    for(const t of b) byId.set(t.id,t);
+    for(const t of a){ const o=byId.get(t.id); if(!o||(t.updatedAt||0)>=(o.updatedAt||0)) byId.set(t.id,t); }
+    return [...byId.values()].filter(t=>!(del[t.id]&&del[t.id]>=(t.updatedAt||0)));
+  }
   function merge(mine,theirs){
     const del={...theirs.deleted,...mine.deleted}; for(const k in theirs.deleted) del[k]=Math.max(theirs.deleted[k]||0,mine.deleted[k]||0);
-    const byId=new Map();
-    for(const t of theirs.tasks) byId.set(t.id,t);
-    for(const t of mine.tasks){ const o=byId.get(t.id); if(!o||(t.updatedAt||0)>=(o.updatedAt||0)) byId.set(t.id,t); }
-    const out=[...byId.values()].filter(t=>!(del[t.id]&&del[t.id]>=(t.updatedAt||0)));
-    return {tasks:out,deleted:del};
+    return {tasks:mergeList(mine.tasks,theirs.tasks,del),reading:mergeList(mine.reading||[],theirs.reading||[],del),deleted:del};
   }
   async function readHandle(){ const f=await handle.getFile(); return {file:f,data:parse(await f.text())}; }
   async function loadFromHandle(){
-    const {file,data}=await readHandle(); tasks=data.tasks; deleted=data.deleted; fileStamp=file.lastModified;
+    const {file,data}=await readHandle(); apply(data); fileStamp=file.lastModified;
     mode="live"; setNote("saved"); showBanner(null); render();
   }
   async function saveNow(){
@@ -305,7 +327,7 @@ header.top{display:flex;align-items:flex-end;justify-content:space-between;gap:1
     try{
       const f=await handle.getFile();
       if(f.lastModified!==fileStamp){ // changed elsewhere (another Mac via iCloud): merge first
-        const m=merge({tasks,deleted},parse(await f.text())); tasks=m.tasks; deleted=m.deleted; render();
+        apply(merge({tasks,reading,deleted},parse(await f.text()))); render();
       }
       const w=await handle.createWritable(); await w.write(serialize()); await w.close();
       fileStamp=(await handle.getFile()).lastModified; setNote("saved");
@@ -315,7 +337,7 @@ header.top{display:flex;align-items:flex-end;justify-content:space-between;gap:1
   function queueSave(){ if(mode==="live"){ dirty=true; setNote("saving"); clearTimeout(saveTimer); saveTimer=setTimeout(saveNow,500); } else if(mode==="copy"){ setNote("unsaved"); } }
   async function refreshIfChanged(){
     if(mode!=="live"||saving||dirty) return;
-    try{ const f=await handle.getFile(); if(f.lastModified!==fileStamp){ const d=parse(await f.text()); tasks=d.tasks; deleted=d.deleted; fileStamp=f.lastModified; render(); } }catch(e){}
+    try{ const f=await handle.getFile(); if(f.lastModified!==fileStamp){ apply(parse(await f.text())); fileStamp=f.lastModified; render(); } }catch(e){}
   }
   document.addEventListener("visibilitychange",()=>{ if(!document.hidden) refreshIfChanged(); });
   window.addEventListener("focus",refreshIfChanged);
@@ -353,7 +375,7 @@ header.top{display:flex;align-items:flex-end;justify-content:space-between;gap:1
     }
   }
   $("filein").addEventListener("change",async e=>{ const f=e.target.files[0]; if(!f) return;
-    try{ const d=parse(await f.text()); tasks=d.tasks; deleted=d.deleted; mode="copy"; setNote("copy");
+    try{ apply(parse(await f.text())); mode="copy"; setNote("copy");
       showBanner([el("b",null,"Viewing a copy. "),"Edits here aren't saved to iCloud. Use ",el("b",null,"Download updated file")," and replace tasks.json if you change anything."],
         [el("button",{class:"btn ghost",type:"button",onclick:download},"Download updated file")]);
       render(); }catch(err){ toast(err.message||"Couldn't read that file."); } e.target.value=""; });
@@ -366,6 +388,39 @@ header.top{display:flex;align-items:flex-end;justify-content:space-between;gap:1
     const t=tasks.find(x=>x.id===id); if(!t) return; Object.assign(t,stampDone(data),{updatedAt:Date.now()}); render(); queueSave();
   }
   function remove(id){ tasks=tasks.filter(x=>x.id!==id); deleted[id]=Date.now(); render(); queueSave(); }
+  // reading list
+  function safeUrl(u){ try{ const x=new URL(u.trim()); return (x.protocol==="https:"||x.protocol==="http:")?x.href:null; }catch(e){ return null; } }
+  function hostOf(u){ try{ return new URL(u).hostname.replace(/^www\./,""); }catch(e){ return ""; } }
+  function patchRead(id,data){ if(mode==="none"){ askConnect(); return; } const r=reading.find(x=>x.id===id); if(!r) return; Object.assign(r,data,{updatedAt:Date.now()}); render(); queueSave(); }
+  function removeRead(id){ reading=reading.filter(x=>x.id!==id); deleted[id]=Date.now(); render(); queueSave(); }
+  $("readform").addEventListener("submit",e=>{
+    e.preventDefault();
+    if(mode==="none"){ askConnect(); toast("Connect your tasks file first."); return; }
+    let raw=$("read-url").value.trim(); if(raw&&!/^[a-z]+:\/\//i.test(raw)) raw="https://"+raw;
+    const url=safeUrl(raw); if(!url){ toast("That doesn't look like a web link. Paste one starting with https://"); return; }
+    if(reading.some(r=>r.url===url&&!r.read)){ toast("That link is already on your list."); return; }
+    const ts=Date.now();
+    reading.push({id:"r"+uid(),url,title:$("read-title").value.trim()||null,read:false,addedAt:ts,updatedAt:ts});
+    $("read-url").value=""; $("read-title").value=""; render(); queueSave();
+  });
+  function renderReading(){
+    const ul=$("readlist"); ul.replaceChildren();
+    const unread=reading.filter(r=>!r.read).sort((a,b)=>(b.addedAt||0)-(a.addedAt||0));
+    const read=reading.filter(r=>r.read).sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
+    if(!reading.length){ ul.append(emptyMsg("Saved links show here once your tasks file is connected.","Nothing saved yet. Paste a link above to read it later.")); $("readmore").replaceChildren(); return; }
+    const row=r=>{ const url=safeUrl(r.url); let path=""; try{ path=new URL(r.url).pathname.replace(/\/$/,""); }catch(e){}
+      const label=r.title||(hostOf(r.url)+path)||r.url;
+      return el("li",{class:r.read?"read":""},
+        el("button",{class:"check small"+(r.read?" on":""),type:"button","aria-label":(r.read?"Mark unread: ":"Mark read: ")+label,onclick:()=>patchRead(r.id,{read:!r.read})},checkSvg()),
+        el("div",{class:"rbody"}, url?el("a",{href:url,target:"_blank",rel:"noopener noreferrer",text:label}):el("span",{text:label}),
+          el("div",{class:"host",text:hostOf(r.url)+(r.addedAt?" · added "+new Date(r.addedAt).toLocaleDateString("en-GB",{day:"numeric",month:"short"}):"")})),
+        el("button",{class:"x",type:"button","aria-label":"Remove "+label,onclick:()=>removeRead(r.id)},"✕")); };
+    for(const r of unread) ul.append(row(r));
+    if(!unread.length) ul.append(el("li",{class:"empty-note"},"All caught up."));
+    if(showAllRead) for(const r of read) ul.append(row(r));
+    $("readmore").replaceChildren(read.length?el("button",{class:"link-btn",type:"button",onclick:()=>{showAllRead=!showAllRead;render();}},showAllRead?"Hide read":`Show ${read.length} read`):"");
+  }
+
   $("addform").addEventListener("submit",e=>{
     e.preventDefault(); const name=$("new-name").value.trim(); if(!name) return;
     if(mode==="none"){ askConnect(); toast("Connect your tasks file first."); return; }
@@ -377,7 +432,7 @@ header.top{display:flex;align-items:flex-end;justify-content:space-between;gap:1
   // ---------- render
   function render(){
     const ae=document.activeElement, aid=ae&&ae.id, sel=ae&&ae.selectionStart;
-    renderOverview(); renderUpcoming(); renderCats(); renderFilters(); renderList(); renderDone();
+    renderOverview(); renderUpcoming(); renderCats(); renderFilters(); renderList(); renderDone(); renderReading();
     if(aid){ const n=$(aid); if(n&&n!==ae){ n.focus(); try{ if(sel!=null) n.setSelectionRange(sel,sel);}catch(e){} } }
   }
   const emptyMsg=(a,b)=>el("li",{class:"empty-note"},mode==="none"?a:b);
